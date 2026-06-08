@@ -1,0 +1,89 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHT.h"
+
+const char* ssid     = "tpxxx";
+const char* password = "5xxxxxxxx4";
+
+// Paste the macro URL provided during step 3 here:
+const char* googleWebAppUrl = "https://script.google.com/macros/s/AG/exec";
+
+#define DHTPIN 4     
+#define DHTTYPE DHT22   
+DHT dht(DHTPIN, DHTTYPE);
+
+#define TIME_TO_SLEEP  40        
+#define uS_TO_S_FACTOR 1000000ULL  
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  // 1. Read sensor first (takes ~250ms for DHT22)
+  float humidity = dht.readHumidity();
+  float temperature_C = dht.readTemperature();
+
+  // If sensor fails, shut down radio immediately and sleep
+  if (isnan(humidity) || isnan(temperature_C)) {
+    Serial.println("DHT sensor read failed! Entering sleep...");
+    goToSleep();
+  }
+
+  // 2. Start Wi-Fi connection
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  // Cap attempts to 20 (10 seconds max) to prevent infinite loop/battery drain
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  Serial.println();
+
+  // 3. Process HTTP POST if connected
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    
+    http.begin(googleWebAppUrl);
+    http.addHeader("Content-Type", "application/json");
+    
+    // CRITICAL FIX: Explicitly force HTTPClient to follow Google's redirects
+    // Updated to use the correct constant for newer ESP32 core versions
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); 
+    
+    // Optimize string creation using modern formatting
+    String jsonPayload = "{\"temperature\":" + String(temperature_C, 1) + 
+                         ",\"humidity\":" + String(humidity, 1) + "}";
+    
+    int httpResponseCode = http.POST(jsonPayload);
+    
+    if (httpResponseCode > 0) {
+      Serial.printf("HTTP Response Code: %d\n", httpResponseCode);
+      Serial.println("Server Response: " + http.getString());
+    } else {
+      Serial.printf("Error sending POST request: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("Wi-Fi Connection Failed!");
+  }
+
+  // 4. Power down gracefully
+  goToSleep();
+}
+
+void loop() {}
+
+void goToSleep() {
+  // Turn off Wi-Fi radio safely before sleeping to save maximum power
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  
+  Serial.println("Going to sleep now...");
+  Serial.flush(); // Ensure serial data finishes printing
+  
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  esp_deep_sleep_start();
+}
